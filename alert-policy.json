@@ -1,0 +1,22 @@
+{
+  "displayName": "mew-pull-worker PubSub errors",
+  "combiner": "OR",
+  "conditions": [
+    {
+      "displayName": "PubSub errors > 0 (5m)",
+      "conditionThreshold": {
+        "filter": "resource.type=\"cloud_run_revision\" AND metric.type=\"logging.googleapis.com/user/mew_pull_worker_pubsub_errors\"",
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 0,
+        "duration": "0s",
+        "aggregations": [
+          {
+            "alignmentPeriod": "300s",
+            "perSeriesAligner": "ALIGN_RATE"
+          }
+        ]
+      }
+    }
+  ],
+  "enabled": true
+}

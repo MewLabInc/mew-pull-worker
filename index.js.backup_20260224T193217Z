@@ -1,0 +1,407 @@
+import express from "express";
+import { PubSub } from "@google-cloud/pubsub";
+import { createClient } from "@supabase/supabase-js";
+
+const BUILD_ID = process.env.BUILD_ID || "no-build-id";
+const PROJECT_ID =
+  process.env.GOOGLE_CLOUD_PROJECT ||
+  process.env.GCP_PROJECT ||
+  process.env.PUBSUB_PROJECT ||
+  "mew-prod-488113";
+
+const SUB_NAME = process.env.PUBSUB_SUB_FOOD || "food-ingest-sub";
+const SUB_PATH = SUB_NAME.startsWith("projects/")
+  ? SUB_NAME
+  : `projects/${PROJECT_ID}/subscriptions/${SUB_NAME}`;
+
+const MAX_MESSAGES = Number(process.env.MAX_MESSAGES || "5");
+const MAX_BODY_BYTES = Number(process.env.MAX_BODY_BYTES || String(256 * 1024)); // 256KB
+
+let IS_READY = false;
+let supabase = null;
+let subscription = null;
+
+const stats = {
+  startedAt: new Date().toISOString(),
+  buildId: BUILD_ID,
+  projectId: PROJECT_ID,
+  subPath: SUB_PATH,
+  recv: 0,
+  acked: 0,
+  nacked: 0,
+  dropped: 0, // acked but not processed (invalid/permanent)
+  lastMsgId: null,
+  lastErr: null,
+  lastDbErrCode: null,
+  initOk: false,
+};
+
+function jlog(event, data = {}) {
+  const payload = {
+    event,
+    ts: new Date().toISOString(),
+    build_id: BUILD_ID,
+    service: process.env.K_SERVICE,
+    revision: process.env.K_REVISION,
+    ...data,
+  };
+  console.log(
+    Object.entries(payload)
+      .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
+      .join(";")
+  );
+}
+
+function setErr(err) {
+  stats.lastErr = err?.message || String(err);
+  stats.lastDbErrCode = err?.code || err?.status || null;
+}
+
+process.on("unhandledRejection", (e) => {
+  setErr(e);
+  jlog("unhandledRejection", { err: stats.lastErr });
+});
+process.on("uncaughtException", (e) => {
+  setErr(e);
+  jlog("uncaughtException", { err: stats.lastErr });
+});
+
+const app = express();
+app.get("/", (_req, res) => res.status(200).send("ok"));
+app.get("/healthz", (_req, res) => res.status(200).send("ok"));
+app.get("/readyz", (_req, res) =>
+  res.status(IS_READY ? 200 : 503).send(IS_READY ? "ready" : "not-ready")
+);
+app.get("/debug", (_req, res) => res.status(200).json(stats));
+
+function loadWorkerConfig() {
+  const raw = process.env.MEW_WORKER_CONFIG;
+  if (!raw) throw new Error("Missing env: MEW_WORKER_CONFIG");
+
+  let cfg;
+  try {
+    cfg = JSON.parse(raw);
+  } catch {
+    throw new Error("MEW_WORKER_CONFIG is not valid JSON");
+  }
+
+  if (!cfg.SUPABASE_URL) throw new Error("MEW_WORKER_CONFIG missing SUPABASE_URL");
+  if (!cfg.SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error("MEW_WORKER_CONFIG missing SUPABASE_SERVICE_ROLE_KEY");
+  }
+  return cfg;
+}
+
+function isUniqueViolation(err) {
+  return err && (err.code === "23505" || err?.details?.includes?.("23505"));
+}
+
+// ---- concurrency guard (simple semaphore) ----
+function createSemaphore(limit) {
+  let active = 0;
+  const queue = [];
+  const acquire = () =>
+    new Promise((resolve) => {
+      if (active < limit) {
+        active += 1;
+        resolve(() => release());
+      } else {
+        queue.push(resolve);
+      }
+    });
+  const release = () => {
+    active = Math.max(0, active - 1);
+    const next = queue.shift();
+    if (next) {
+      active += 1;
+      next(() => release());
+    }
+  };
+  return { acquire, get active() { return active; }, get queued() { return queue.length; } };
+}
+
+const sem = createSemaphore(MAX_MESSAGES);
+
+// ---- envelope validation ----
+function validateEnvelope(env) {
+  if (!env || typeof env !== "object") return { ok: false, reason: "not_object" };
+  if (!env.source || typeof env.source !== "string") return { ok: false, reason: "missing_source" };
+  if (!env.dedupe_key || typeof env.dedupe_key !== "string")
+    return { ok: false, reason: "missing_dedupe_key" };
+  if (!env.event_type || typeof env.event_type !== "string")
+    return { ok: false, reason: "missing_event_type" };
+  if (env.payload !== undefined && typeof env.payload !== "object")
+    return { ok: false, reason: "payload_not_object" };
+  return { ok: true };
+}
+
+// ---- error classification ----
+function classifyError(err) {
+  const msg = (err?.message || String(err)).toLowerCase();
+  const code = err?.code || err?.status || null;
+
+  // Permanent auth/permission/config errors
+  if (code === 401 || code === 403) return { kind: "permanent", class: "auth" };
+  if (msg.includes("invalid api key") || msg.includes("jwt")) return { kind: "permanent", class: "auth" };
+
+  // Permanent envelope / validation errors (we create these ourselves with "ENVELOPE:")
+  if (msg.startsWith("envelope:")) return { kind: "permanent", class: "envelope" };
+  if (msg.startsWith("unknown_event_type:")) return { kind: "permanent", class: "unknown_event" };
+
+  // Unique constraint is not an error for us
+  if (isUniqueViolation(err)) return { kind: "duplicate", class: "duplicate" };
+
+  // Transient conditions
+  if (code === 429) return { kind: "transient", class: "rate_limited" };
+  if (code && Number(code) >= 500) return { kind: "transient", class: "remote_5xx" };
+  if (
+    msg.includes("timeout") ||
+    msg.includes("econnreset") ||
+    msg.includes("etimedout") ||
+    msg.includes("enotfound") ||
+    msg.includes("eai_again") ||
+    msg.includes("socket hang up") ||
+    msg.includes("fetch failed")
+  ) {
+    return { kind: "transient", class: "network" };
+  }
+
+  // Default: transient (conservative)
+  return { kind: "transient", class: "unknown" };
+}
+
+// ---- DB persistence ----
+async function persistWorkerEvent(envelope, pubsubMeta, status = "received", last_error = null) {
+  const row = {
+    source: envelope.source,
+    dedupe_key: envelope.dedupe_key,
+    event_type: envelope.event_type ?? null,
+    entity_type: envelope.entity_type ?? null,
+    entity_id: envelope.entity_id ?? null,
+    occurred_at: envelope.occurred_at ?? null,
+    actor_user_id: envelope.actor_user_id ?? null,
+    trace_id: envelope.trace_id ?? null,
+    status,
+    last_error,
+    payload: {
+      envelope,
+      _pubsub: pubsubMeta,
+      _build: BUILD_ID,
+    },
+  };
+
+  const { error } = await supabase.from("worker_events").insert(row);
+  if (error) throw error;
+}
+
+// ---- handlers registry ----
+// Today: default behavior is persist-only. Tomorrow: add USDA + places handlers here.
+const handlers = {
+  // Phase 0 baseline
+  "test.event": async (_ctx) => {},
+
+  // Scaffolds (implement later)
+  "food.usda.ingest": async (_ctx) => {
+    // fetch from USDA, write normalized tables, etc.
+  },
+  "places.seed.city": async (_ctx) => {
+    // seed places for a city (provider search), write places table, etc.
+  },
+};
+
+function getHandler(eventType) {
+  return handlers[eventType] || null;
+}
+
+// ---- ack/nack safety ----
+function ackOnce(m) {
+  if (m.__mew_done) return false;
+  m.__mew_done = true;
+  m.ack();
+  return true;
+}
+function nackOnce(m) {
+  if (m.__mew_done) return false;
+  m.__mew_done = true;
+  m.nack();
+  return true;
+}
+
+async function init() {
+  // 1) Supabase
+  const cfg = loadWorkerConfig();
+  supabase = createClient(cfg.SUPABASE_URL, cfg.SUPABASE_SERVICE_ROLE_KEY, {
+    auth: { persistSession: false },
+  });
+
+  // 2) Pub/Sub subscription
+  const pubsub = new PubSub({ projectId: PROJECT_ID });
+  subscription = pubsub.subscription(SUB_PATH, {
+    flowControl: { maxMessages: MAX_MESSAGES, allowExcessMessages: false },
+  });
+
+  subscription.on("error", (err) => {
+    setErr(err);
+    jlog("pubsub_error_listener", { err: stats.lastErr });
+  });
+
+  subscription.on("message", async (m) => {
+    const release = await sem.acquire();
+    try {
+      const msgId = m.id;
+      const attributes = m.attributes || {};
+      stats.recv += 1;
+      stats.lastMsgId = msgId;
+
+      jlog("pubsub_recv", {
+        msgId,
+        attributes,
+        sem_active: sem.active,
+        sem_queued: sem.queued,
+      });
+
+      const raw = m.data ? m.data.toString("utf8") : "";
+      if (!raw) {
+        jlog("pubsub_invalid_envelope", { msgId, reason: "empty_body" });
+        stats.dropped += 1;
+        if (ackOnce(m)) stats.acked += 1;
+        return;
+      }
+
+      if (Buffer.byteLength(raw, "utf8") > MAX_BODY_BYTES) {
+        jlog("pubsub_invalid_envelope", { msgId, reason: "body_too_large", max: MAX_BODY_BYTES });
+        stats.dropped += 1;
+        if (ackOnce(m)) stats.acked += 1;
+        return;
+      }
+
+      let envelope;
+      try {
+        envelope = JSON.parse(raw);
+      } catch {
+        jlog("pubsub_invalid_envelope", { msgId, reason: "invalid_json" });
+        stats.dropped += 1;
+        if (ackOnce(m)) stats.acked += 1;
+        return;
+      }
+
+      const v = validateEnvelope(envelope);
+      if (!v.ok) {
+        const errMsg = `ENVELOPE:${v.reason}`;
+        jlog("pubsub_invalid_envelope", { msgId, reason: v.reason });
+        // optional: persist failed event (no dedupe_key? then cannot persist reliably)
+        stats.dropped += 1;
+        if (ackOnce(m)) stats.acked += 1;
+        return;
+      }
+
+      const handler = getHandler(envelope.event_type);
+      if (!handler) {
+        const errMsg = `unknown_event_type:${envelope.event_type}`;
+        jlog("unknown_event_type", { msgId, event_type: envelope.event_type });
+        // Persist as failed so you can inspect later, but ACK to avoid poison retries
+        try {
+          const meta = {
+            msgId,
+            attributes,
+            publishTime: m.publishTime ? new Date(m.publishTime).toISOString() : null,
+            sub: SUB_PATH,
+          };
+          await persistWorkerEvent(envelope, meta, "failed", errMsg);
+          jlog("db_insert_ok", { msgId, dedupe_key: envelope.dedupe_key, source: envelope.source });
+        } catch (e) {
+          // if DB fails here, treat as transient
+          setErr(e);
+          jlog("persist_failed_unknown_event", { msgId, err: stats.lastErr });
+          stats.nacked += 1;
+          if (nackOnce(m)) return;
+        }
+        stats.dropped += 1;
+        if (ackOnce(m)) stats.acked += 1;
+        return;
+      }
+
+      const meta = {
+        msgId,
+        attributes,
+        publishTime: m.publishTime ? new Date(m.publishTime).toISOString() : null,
+        sub: SUB_PATH,
+      };
+
+      // Persist received event first (Phase 0 contract)
+      try {
+        await persistWorkerEvent(envelope, meta);
+        jlog("db_insert_ok", { msgId, dedupe_key: envelope.dedupe_key, source: envelope.source });
+      } catch (dbErr) {
+        const cls = classifyError(dbErr);
+        setErr(dbErr);
+
+        if (cls.kind === "duplicate") {
+          jlog("db_duplicate_ack", { msgId, dedupe_key: envelope.dedupe_key });
+          if (ackOnce(m)) stats.acked += 1;
+          return;
+        }
+
+        jlog("db_insert_failed", { msgId, err: stats.lastErr, error_class: cls.class });
+        if (cls.kind === "permanent") {
+          stats.dropped += 1;
+          if (ackOnce(m)) stats.acked += 1;
+          return;
+        }
+
+        stats.nacked += 1;
+        if (!nackOnce(m)) return;
+        return;
+      }
+
+      // Run handler (for now, most are no-ops)
+      jlog("handler_start", { msgId, event_type: envelope.event_type });
+      try {
+        await handler({ envelope, meta });
+        jlog("handler_ok", { msgId, event_type: envelope.event_type });
+
+        if (ackOnce(m)) stats.acked += 1;
+        jlog("pubsub_acked", { msgId });
+      } catch (err) {
+        const cls = classifyError(err);
+        setErr(err);
+        jlog("handler_fail", { msgId, event_type: envelope.event_type, err: stats.lastErr, error_class: cls.class });
+
+        if (cls.kind === "permanent") {
+          stats.dropped += 1;
+          if (ackOnce(m)) stats.acked += 1;
+          return;
+        }
+
+        stats.nacked += 1;
+        if (!nackOnce(m)) return;
+      }
+    } catch (e) {
+      setErr(e);
+      stats.nacked += 1;
+      jlog("pubsub_handler_crash", { msgId: m.id, err: stats.lastErr });
+      try {
+        nackOnce(m);
+      } catch {}
+    } finally {
+      release();
+    }
+  });
+
+  stats.initOk = true;
+  IS_READY = true;
+  jlog("ready", { sub: SUB_PATH, maxMessages: MAX_MESSAGES });
+}
+
+// start server FIRST so Cloud Run is satisfied
+const port = process.env.PORT || 8080;
+app.listen(port, () => {
+  jlog("http_listening", { port });
+  Promise.resolve()
+    .then(() => init())
+    .catch((e) => {
+      setErr(e);
+      IS_READY = false;
+      jlog("init_failed", { err: stats.lastErr });
+    });
+});  

@@ -1,0 +1,231 @@
+import express from "express";
+import { PubSub } from "@google-cloud/pubsub";
+import { createClient } from "@supabase/supabase-js";
+
+const BUILD_ID = process.env.BUILD_ID || "no-build-id";
+const PROJECT_ID =
+  process.env.GOOGLE_CLOUD_PROJECT ||
+  process.env.GCP_PROJECT ||
+  process.env.PUBSUB_PROJECT ||
+  "mew-prod-488113";
+
+const SUB_NAME = process.env.PUBSUB_SUB_FOOD || "food-ingest-sub";
+const SUB_PATH = SUB_NAME.startsWith("projects/")
+  ? SUB_NAME
+  : `projects/${PROJECT_ID}/subscriptions/${SUB_NAME}`;
+
+const MAX_MESSAGES = Number(process.env.MAX_MESSAGES || "5");
+
+let IS_READY = false;
+let supabase = null;
+let subscription = null;
+
+const stats = {
+  startedAt: new Date().toISOString(),
+  buildId: BUILD_ID,
+  projectId: PROJECT_ID,
+  subPath: SUB_PATH,
+  recv: 0,
+  acked: 0,
+  nacked: 0,
+  lastMsgId: null,
+  lastErr: null,
+  lastDbErrCode: null,
+  initOk: false,
+};
+
+function jlog(event, data = {}) {
+  const payload = {
+    event,
+    ts: new Date().toISOString(),
+    build_id: BUILD_ID,
+    service: process.env.K_SERVICE,
+    revision: process.env.K_REVISION,
+    ...data,
+  };
+  console.log(
+    Object.entries(payload)
+      .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
+      .join(";")
+  );
+}
+
+function setErr(err) {
+  stats.lastErr = err?.message || String(err);
+  stats.lastDbErrCode = err?.code || null;
+}
+
+process.on("unhandledRejection", (e) => {
+  setErr(e);
+  jlog("unhandledRejection", { err: stats.lastErr });
+});
+process.on("uncaughtException", (e) => {
+  setErr(e);
+  jlog("uncaughtException", { err: stats.lastErr });
+});
+
+const app = express();
+
+// always listen; readiness is separate
+app.get("/", (_req, res) => res.status(200).send("ok"));
+app.get("/healthz", (_req, res) => res.status(200).send("ok"));
+app.get("/readyz", (_req, res) =>
+  res.status(IS_READY ? 200 : 503).send(IS_READY ? "ready" : "not-ready")
+);
+app.get("/debug", (_req, res) => res.status(200).json(stats));
+
+function loadWorkerConfig() {
+  const raw = process.env.MEW_WORKER_CONFIG;
+  if (!raw) throw new Error("Missing env: MEW_WORKER_CONFIG");
+
+  let cfg;
+  try {
+    cfg = JSON.parse(raw);
+  } catch {
+    throw new Error("MEW_WORKER_CONFIG is not valid JSON");
+  }
+
+  if (!cfg.SUPABASE_URL) throw new Error("MEW_WORKER_CONFIG missing SUPABASE_URL");
+  if (!cfg.SUPABASE_SERVICE_ROLE_KEY)
+    throw new Error("MEW_WORKER_CONFIG missing SUPABASE_SERVICE_ROLE_KEY");
+
+  return cfg;
+}
+
+function isUniqueViolation(err) {
+  return err && (err.code === "23505" || err?.details?.includes?.("23505"));
+}
+
+async function persistWorkerEvent(envelope, pubsubMeta) {
+  const { source, dedupe_key } = envelope || {};
+  if (!source) throw new Error("Invalid envelope: missing source");
+  if (!dedupe_key) throw new Error("Invalid envelope: missing dedupe_key");
+
+  const row = {
+    source,
+    dedupe_key,
+    event_type: envelope.event_type ?? null,
+    entity_type: envelope.entity_type ?? null,
+    entity_id: envelope.entity_id ?? null,
+    occurred_at: envelope.occurred_at ?? null,
+    actor_user_id: envelope.actor_user_id ?? null,
+    trace_id: envelope.trace_id ?? null,
+    payload: {
+      envelope,
+      _pubsub: pubsubMeta,
+      _build: BUILD_ID,
+    },
+  };
+
+  const { error } = await supabase.from("worker_events").insert(row);
+  if (error) throw error;
+}
+
+async function init() {
+  // 1) Supabase
+  const cfg = loadWorkerConfig();
+  supabase = createClient(cfg.SUPABASE_URL, cfg.SUPABASE_SERVICE_ROLE_KEY, {
+    auth: { persistSession: false },
+  });
+
+  // 2) Pub/Sub subscription
+  const pubsub = new PubSub({ projectId: PROJECT_ID });
+  subscription = pubsub.subscription(SUB_PATH, {
+    flowControl: { maxMessages: MAX_MESSAGES, allowExcessMessages: false },
+  });
+
+  subscription.on("error", (err) => {
+    setErr(err);
+    jlog("pubsub_error_listener", { err: stats.lastErr });
+  });
+
+  subscription.on("message", async (m) => {
+    const msgId = m.id;
+    const attributes = m.attributes || {};
+    stats.recv += 1;
+    stats.lastMsgId = msgId;
+
+    jlog("pubsub_recv", { msgId, attributes });
+
+    try {
+      const raw = m.data ? m.data.toString("utf8") : "";
+      if (!raw) {
+        jlog("pubsub_invalid_envelope", { msgId, reason: "empty_body" });
+        m.ack();
+        stats.acked += 1;
+        return;
+      }
+
+      let envelope;
+      try {
+        envelope = JSON.parse(raw);
+      } catch {
+        jlog("pubsub_invalid_envelope", { msgId, reason: "invalid_json" });
+        m.ack();
+        stats.acked += 1;
+        return;
+      }
+
+      const meta = {
+        msgId,
+        attributes,
+        publishTime: m.publishTime ? new Date(m.publishTime).toISOString() : null,
+        sub: SUB_PATH,
+      };
+
+      try {
+        await persistWorkerEvent(envelope, meta);
+        jlog("db_insert_ok", {
+          msgId,
+          dedupe_key: envelope?.dedupe_key,
+          source: envelope?.source,
+        });
+        m.ack();
+        stats.acked += 1;
+        jlog("pubsub_acked", { msgId });
+      } catch (dbErr) {
+        setErr(dbErr);
+
+        if (isUniqueViolation(dbErr)) {
+          jlog("db_duplicate_ack", { msgId, dedupe_key: envelope?.dedupe_key });
+          m.ack();
+          stats.acked += 1;
+          return;
+        }
+
+        stats.nacked += 1;
+        jlog("pubsub_error", { msgId, err: stats.lastErr, code: stats.lastDbErrCode });
+        try {
+          m.nack();
+        } catch (e) {
+          jlog("pubsub_nack_failure", { msgId, err: e?.message || String(e) });
+        }
+      }
+    } catch (e) {
+      setErr(e);
+      stats.nacked += 1;
+      jlog("pubsub_handler_crash", { msgId, err: stats.lastErr });
+      try {
+        m.nack();
+      } catch {}
+    }
+  });
+
+  stats.initOk = true;
+  IS_READY = true;
+  jlog("ready", { sub: SUB_PATH, maxMessages: MAX_MESSAGES });
+}
+
+// start server FIRST so Cloud Run is satisfied
+const port = process.env.PORT || 8080;
+app.listen(port, () => {
+  jlog("http_listening", { port });
+  // now init background components
+  Promise.resolve()
+    .then(() => init())
+    .catch((e) => {
+      setErr(e);
+      IS_READY = false; // keep not-ready if init fails
+      jlog("init_failed", { err: stats.lastErr });
+    });
+});

@@ -1,0 +1,113 @@
+import express from "express";
+import { PubSub } from "@google-cloud/pubsub";
+
+const BUILD_ID = process.env.BUILD_ID || process.env.BUILD_TAG || "no-build-id";
+
+const stats = {
+  startedAt: new Date().toISOString(),
+  buildId: BUILD_ID,
+  projectId: null,
+  subPath: null,
+  subStartedAt: null,
+  recv: 0,
+  acked: 0,
+  nacked: 0,
+  lastMsgId: null,
+  lastRaw: null,
+  lastErr: null,
+};
+
+function setErr(err) {
+  stats.lastErr = err?.message || String(err);
+}
+
+process.on("unhandledRejection", (err) => setErr(err));
+process.on("uncaughtException", (err) => setErr(err));
+
+const app = express();
+
+// Always stamp responses so we can prove which build served it
+app.use((_req, res, next) => {
+  res.setHeader("x-mew-build-id", BUILD_ID);
+  next();
+});
+
+app.get("/", (_req, res) => res.status(200).send("ok"));
+app.get("/health", (_req, res) => res.status(200).send("ok"));
+app.get("/debug", (_req, res) => res.status(200).json(stats));
+
+// ---- Pub/Sub pull subscriber ----
+const PROJECT_ID =
+  process.env.PUBSUB_PROJECT ||
+  process.env.GOOGLE_CLOUD_PROJECT ||
+  process.env.GCP_PROJECT ||
+  "mew-prod-488113";
+
+const SUB_RAW = process.env.PUBSUB_SUB_FOOD || "food-ingest-sub";
+const SUB_PATH = SUB_RAW.startsWith("projects/")
+  ? SUB_RAW
+  : `projects/${PROJECT_ID}/subscriptions/${SUB_RAW}`;
+
+stats.projectId = PROJECT_ID;
+stats.subPath = SUB_PATH;
+
+const MAX_MESSAGES = Number(process.env.MAX_MESSAGES || "5");
+
+const pubsub = new PubSub({ projectId: PROJECT_ID });
+let sub;
+
+function startSubscription(subPath) {
+  stats.subStartedAt = new Date().toISOString();
+
+  sub = pubsub.subscription(subPath, {
+    flowControl: { maxMessages: MAX_MESSAGES, allowExcessMessages: false },
+  });
+
+  
+  sub.on("error", (err) => {
+    setErr(err);
+  });
+
+  sub.on("message", (m) => {
+    const msgId = m.id;
+    try {
+      const raw = m.data ? m.data.toString("utf8") : "";
+      stats.recv += 1;
+      stats.lastMsgId = msgId;
+      stats.lastRaw = raw;
+
+      m.ack();
+      stats.acked += 1;
+    } catch (e) {
+      setErr(e);
+      stats.nacked += 1;
+      try { m.nack(); } catch {}
+      // If ack() fails, nack() is a good fallback. If nack() also fails,
+      // the message will eventually time out and be redelivered by Pub/Sub.
+    }
+  });
+}
+
+startSubscription(SUB_PATH);
+
+async function gracefulShutdown(signal) {
+  console.log(`shutdown_signal signal=${signal}`);
+  if (sub) {
+    console.log("closing_pubsub_subscription");
+    try {
+      await sub.close();
+      console.log("pubsub_subscription_closed");
+    } catch (err) {
+      console.error("error_closing_pubsub_subscription", err);
+    }
+  }
+  process.exit(0);
+}
+
+process.on("SIGINT", gracefulShutdown);
+process.on("SIGTERM", gracefulShutdown);
+
+const port = process.env.PORT || 8080;
+app.listen(port, () => {
+  console.log(`http_listening port=${port} build=${BUILD_ID}`);
+});

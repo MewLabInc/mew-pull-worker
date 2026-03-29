@@ -1,0 +1,40 @@
+{
+  "displayName": "food-ingest-sub backlog protection",
+  "combiner": "OR",
+  "notificationChannels": [
+    "projects/mew-prod-488113/notificationChannels/9972955988425495602"
+  ],
+  "conditions": [
+    {
+      "displayName": "Undelivered messages > 100 for 10m",
+      "conditionThreshold": {
+        "filter": "resource.type=\"pubsub_subscription\" AND resource.labels.subscription_id=\"food-ingest-sub\" AND metric.type=\"pubsub.googleapis.com/subscription/num_undelivered_messages\"",
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 100,
+        "duration": "600s",
+        "aggregations": [
+          {
+            "alignmentPeriod": "60s",
+            "perSeriesAligner": "ALIGN_MAX"
+          }
+        ]
+      }
+    },
+    {
+      "displayName": "Oldest unacked message age > 600s for 10m",
+      "conditionThreshold": {
+        "filter": "resource.type=\"pubsub_subscription\" AND resource.labels.subscription_id=\"food-ingest-sub\" AND metric.type=\"pubsub.googleapis.com/subscription/oldest_unacked_message_age\"",
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 600,
+        "duration": "600s",
+        "aggregations": [
+          {
+            "alignmentPeriod": "60s",
+            "perSeriesAligner": "ALIGN_MAX"
+          }
+        ]
+      }
+    }
+  ],
+  "enabled": true
+}

@@ -1,0 +1,10 @@
+node_modules/
+clean-secret*.json
+*.pem
+*.key
+.env
+.env.*
+.DS_Store
+*.log
+
+mew-worker-config*.json
