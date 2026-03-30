@@ -1645,6 +1645,32 @@ function buildMenuCandidates(sourceUrl) {
   return out.slice(0, 140);
 }
 
+async function checkCrawlerHealth() {
+  const healthUrls = [
+    `${CRAWLER_EXTRACT_BASE_URL}/health`,
+    `${CRAWLER_EXTRACT_BASE_URL}/`,
+  ];
+
+  for (const healthUrl of healthUrls) {
+    try {
+      const resp = await fetch(healthUrl, { method: "GET" });
+      return {
+        ok: resp.ok,
+        status: resp.status,
+        url: healthUrl,
+      };
+    } catch (err) {
+      // try next
+    }
+  }
+
+  return {
+    ok: false,
+    status: null,
+    url: CRAWLER_EXTRACT_BASE_URL,
+  };
+}
+
 async function callCrawlerExtract(sourceUrl) {
   const url = asTrimmedString(sourceUrl);
   if (!url) {
@@ -3735,6 +3761,15 @@ async function init() {
   supabase = createClient(workerCfg.SUPABASE_URL, workerCfg.SUPABASE_SERVICE_ROLE_KEY, {
     auth: { persistSession: false },
   });
+
+  const crawlerHealth = await checkCrawlerHealth();
+
+jlog("crawler_health_check", {
+  crawler_base_url: CRAWLER_EXTRACT_BASE_URL,
+  crawler_ok: crawlerHealth.ok,
+  crawler_status: crawlerHealth.status,
+  crawler_health_url: crawlerHealth.url,
+});
 
   // 2) Pub/Sub
   pubsubClient = new PubSub({ projectId: PROJECT_ID });
