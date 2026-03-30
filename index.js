@@ -928,16 +928,197 @@ function detectMenuUrlFromHtml(html, baseUrl) {
   const blockedExtPattern =
     /\.(css|js|json|png|jpg|jpeg|gif|svg|webp|ico|woff|woff2|ttf|eot|map|xml)(\?|#|$)/i;
 
-  const menuWordPattern =
-    /\b(menu|food|drink|dinner|lunch|breakfast|brunch|supper|wine|cocktail|beverage|dessert|order)\b/i;
-
   const hrefPattern = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
 
-  const negativeWordPattern =
-    /\b(christmas|xmas|event|events|blog|news|article|post|gallery|contact|about|booking|reservation|reserve|gift|voucher|careers|jobs)\b/i;
+  const MENU_KEYWORDS = [
+    "menu",
+    "menus",
+    "food",
+    "food-menu",
+    "drinks",
+    "drink-menu",
+    "dining",
+    "our-menu",
+    "restaurant-menu",
+    "view-menu",
+    "carte",
+    "la-carte",
+    "carta",
+    "speisekarte",
+    "karte",
+    "menue",
+    "getraenkekarte",
+    "speisen",
+    "menukort",
+    "mad",
+    "spisekort",
+    "vinkort",
+    "ementa",
+    "pratos",
+    "refeicoes",
+    "meniu",
+    "maistas",
+    "patiekalai",
+    "jidelni-listek",
+    "listek",
+    "jidlo",
+    "napojovy-listek",
+    "nabidka"
+  ];
 
-  const strongMenuWordPattern =
-    /\b(menu|menus|food menu|drinks menu|dinner menu|lunch menu|breakfast menu|brunch menu)\b/i;
+  const ORDER_KEYWORDS = [
+    "order",
+    "orderfood",
+    "order-food",
+    "order-online",
+    "online-ordering",
+    "fastorder",
+    "homeorder",
+    "order-now",
+    "place-order",
+    "checkout",
+    "commande",
+    "commander",
+    "commande-en-ligne",
+    "commander-en-ligne",
+    "panier",
+    "passer-commande",
+    "pedir",
+    "pedido",
+    "pedidos",
+    "pedidos-en-linea",
+    "pide-aqui",
+    "hacer-pedido",
+    "ordenar",
+    "orden",
+    "bestellen",
+    "bestellung",
+    "online-bestellen",
+    "onlinebestellen",
+    "vorbestellen",
+    "jetzt-bestellen",
+    "bestil",
+    "bestilling",
+    "koeb",
+    "online-bestilling",
+    "bestil-online",
+    "bestil-mad",
+    "encomenda",
+    "encomendar",
+    "fazer-pedido",
+    "encomendas",
+    "uzsakymas",
+    "uzsakyti",
+    "uzsakymai",
+    "pirkti",
+    "objednat",
+    "objednavka",
+    "objednavky",
+    "online-objednavka"
+  ];
+
+  const DELIVERY_KEYWORDS = [
+    "delivery",
+    "deliver",
+    "home-delivery",
+    "delivery-menu",
+    "food-delivery",
+    "order-delivery",
+    "livraison",
+    "livrer",
+    "livraison-a-domicile",
+    "livraison-repas",
+    "domicilio",
+    "entrega",
+    "reparto",
+    "enviar",
+    "envio",
+    "lieferung",
+    "liefern",
+    "lieferservice",
+    "levering",
+    "udbringning",
+    "entregas",
+    "ao-domicilio",
+    "pristatymas",
+    "i-namus",
+    "rozvoz",
+    "dovoz",
+    "doruceni"
+  ];
+
+  const TAKEAWAY_KEYWORDS = [
+    "takeaway",
+    "take-away",
+    "pickup",
+    "pick-up",
+    "collection",
+    "clickandcollect",
+    "click-and-collect",
+    "togo",
+    "to-go",
+    "emporter",
+    "a-emporter",
+    "vente-a-emporter",
+    "retrait",
+    "para-llevar",
+    "llevar",
+    "recoger",
+    "retiro",
+    "abholen",
+    "abholung",
+    "mitnehmen",
+    "zum-mitnehmen",
+    "afhentning",
+    "recolha",
+    "issinesti",
+    "sebou",
+    "s-sebou"
+  ];
+
+  const NEGATIVE_KEYWORDS = [
+    "christmas",
+    "xmas",
+    "event",
+    "events",
+    "blog",
+    "news",
+    "article",
+    "post",
+    "gallery",
+    "contact",
+    "about",
+    "booking",
+    "reservation",
+    "reserve",
+    "gift",
+    "voucher",
+    "careers",
+    "jobs",
+    "privacy",
+    "terms",
+    "members",
+    "member",
+    "login",
+    "register",
+    "account",
+    "profile",
+    "franchise",
+    "press",
+    "media",
+    "faq"
+  ];
+
+  const CHOOSER_KEYWORDS = [
+    "menu.html",
+    "order-type",
+    "how-would-you-like-to-order",
+    "choose",
+    "choose-order",
+    "choose-your-order",
+    "select-order",
+    "start-order"
+  ];
 
   let base;
   try {
@@ -945,6 +1126,17 @@ function detectMenuUrlFromHtml(html, baseUrl) {
   } catch {
     return null;
   }
+
+  const scoreIncludes = (text, words, weight) => {
+    let score = 0;
+    for (const word of words) {
+      if (text.includes(word)) score += weight;
+    }
+    return score;
+  };
+
+  const countSegments = (pathname) =>
+    String(pathname || "").split("/").filter(Boolean).length;
 
   const candidates = [];
 
@@ -972,30 +1164,65 @@ function detectMenuUrlFromHtml(html, baseUrl) {
 
     const sameHost = resolved.hostname === base.hostname;
     const pathLower = resolved.pathname.toLowerCase();
-    const fullLower = (urlStr + " " + anchorText).toLowerCase();
+    const fullLower = `${urlStr} ${anchorText}`.toLowerCase();
+    const segmentCount = countSegments(pathLower);
 
     let score = 0;
 
     if (sameHost) score += 5;
-    if (menuWordPattern.test(fullLower)) score += 5;
-    if (strongMenuWordPattern.test(fullLower)) score += 4;
 
-    if (/(^|\/)(menu|menus)(\/|$)/i.test(pathLower)) score += 8;
-    if (/(^|\/)(food|drink|drinks|dining|eat|order)(\/|$)/i.test(pathLower)) score += 4;
+    score += scoreIncludes(pathLower, MENU_KEYWORDS, 8);
+    score += scoreIncludes(pathLower, ORDER_KEYWORDS, 5);
+    score += scoreIncludes(pathLower, DELIVERY_KEYWORDS, 4);
+    score += scoreIncludes(pathLower, TAKEAWAY_KEYWORDS, 4);
+
+    score += scoreIncludes(fullLower, MENU_KEYWORDS, 2);
+    score += scoreIncludes(fullLower, ORDER_KEYWORDS, 2);
+    score += scoreIncludes(fullLower, DELIVERY_KEYWORDS, 1);
+    score += scoreIncludes(fullLower, TAKEAWAY_KEYWORDS, 1);
+
+    if (/(^|\/)(menu|menus)(\/|$)/i.test(pathLower)) score += 10;
+    if (/(^|\/)(collection|pickup|takeaway|delivery|home-delivery)(\/|$)/i.test(pathLower)) score += 8;
+    if (/\/menu\/[^/]+(\.html)?$/i.test(pathLower)) score += 8;
+    if (/\/menu\/(collection|pickup|takeaway|delivery|home-delivery)(\.html)?$/i.test(pathLower)) score += 12;
+    if (/\/(order|order-online|orderfood|fastorder|homeorder)\/[^/]+(\.html)?$/i.test(pathLower)) score += 6;
     if (/pdf(\?|#|$)/i.test(urlStr)) score += 3;
 
-  if (/(christmas|xmas|event|events|blog|news|article|post|gallery|contact|about|booking|reservation|reserve|gift|voucher|careers|jobs)/i.test(fullLower)) {
-  score -= 8;
-}
+    if (segmentCount >= 2) score += 2;
+    if (segmentCount >= 3) score += 3;
+
+    for (const word of NEGATIVE_KEYWORDS) {
+      if (fullLower.includes(word)) score -= 8;
+    }
+
+    for (const word of CHOOSER_KEYWORDS) {
+      if (fullLower.includes(word)) score -= 6;
+    }
+
+    if (/\/$/.test(pathLower) && segmentCount <= 1) score -= 4;
+    if (/\/restaurant\/?$/.test(pathLower)) score -= 6;
+    if (/\/home\/?$/.test(pathLower)) score -= 8;
+    if (/\/members?\/?$/.test(pathLower)) score -= 10;
+    if (/\/contact\/?$/.test(pathLower)) score -= 10;
+    if (/\/reservations?\/?$/.test(pathLower)) score -= 10;
 
     if (score <= 0) continue;
 
-    candidates.push({ url: urlStr, score });
+    candidates.push({
+      url: urlStr,
+      score,
+      path: pathLower
+    });
   }
 
   if (!candidates.length) return null;
 
-  candidates.sort((a, b) => b.score - a.score || a.url.localeCompare(b.url));
+  candidates.sort((a, b) =>
+    b.score - a.score ||
+    b.path.length - a.path.length ||
+    a.url.localeCompare(b.url)
+  );
+
   return candidates[0].url;
 }
 
@@ -1030,8 +1257,10 @@ function buildMenuCandidates(sourceUrl) {
 
   const pathParts = cleanPath.split("/").filter(Boolean);
 
-  // if last segment looks like a file, drop it
-  const looksLikeFile = pathParts.length > 0 && /\.[a-z0-9]{2,8}$/i.test(pathParts[pathParts.length - 1]);
+  const looksLikeFile =
+    pathParts.length > 0 &&
+    /\.[a-z0-9]{2,8}$/i.test(pathParts[pathParts.length - 1]);
+
   const dirParts = looksLikeFile ? pathParts.slice(0, -1) : pathParts;
 
   const fullBase = "/" + dirParts.join("/");
@@ -1044,7 +1273,8 @@ function buildMenuCandidates(sourceUrl) {
   if (parentBase && parentBase !== fullBase && parentBase !== "/") bases.push(parentBase);
   bases.push(rootBase);
 
-  const menuVariants = [
+  const MENU_KEYWORDS = [
+    // English
     "menu",
     "menus",
     "food",
@@ -1052,47 +1282,237 @@ function buildMenuCandidates(sourceUrl) {
     "drinks",
     "drink-menu",
     "dining",
+    "eat",
     "our-menu",
     "restaurant-menu",
+    "view-menu",
+
+    // French
     "carte",
     "la-carte",
+    "nos-menus",
+    "notre-carte",
+    "plats",
+    "boissons",
+    "la-carte-des-vins",
+
+    // Spanish
     "carta",
+    "nuestro-menu",
+    "nuestra-carta",
+    "platillos",
+    "comida",
+
+    // German
     "speisekarte",
-    "menukaart",
+    "karte",
+    "menue",
+    "getraenkekarte",
+    "speisen",
+    "unsere-karte",
+
+    // Danish
+    "menukort",
+    "mad",
+    "vores-menu",
+    "drikkevarer",
+    "spisekort",
+    "vinkort",
+
+    // Portuguese
+    "ementa",
+    "nossa-ementa",
+    "pratos",
+    "refeicoes",
+    "bebidas",
+
+    // Lithuanian
     "meniu",
+    "maistas",
+    "patiekalai",
+    "gerimai",
+    "musu-meniu",
+
+    // Czech
+    "jidelni-listek",
+    "listek",
+    "jidlo",
+    "napojovy-listek",
+    "nabidka"
   ];
 
-  const orderVariants = [
+  const ORDER_KEYWORDS = [
+    // English
     "order",
-    "order-online",
     "orderfood",
+    "order-food",
+    "order-online",
+    "online-ordering",
     "fastorder",
     "homeorder",
-    "takeaway",
-    "pickup",
-    "collection",
-    "click-and-collect",
-    "bestellen",
+    "order-now",
+    "place-order",
+    "checkout",
+
+    // French
     "commande",
     "commander",
-    "ordenar",
+    "commande-en-ligne",
+    "commander-en-ligne",
+    "panier",
+    "passer-commande",
+
+    // Spanish
     "pedir",
+    "pedido",
+    "pedidos",
+    "pedidos-en-linea",
+    "pide-aqui",
+    "hacer-pedido",
+    "ordenar",
+    "orden",
+
+    // German
+    "bestellen",
+    "bestellung",
+    "online-bestellen",
+    "onlinebestellen",
+    "vorbestellen",
+    "jetzt-bestellen",
+
+    // Danish
+    "bestil",
+    "bestilling",
+    "koeb",
+    "online-bestilling",
+    "bestil-online",
+    "bestil-mad",
+
+    // Portuguese
+    "encomenda",
+    "encomendar",
+    "fazer-pedido",
+    "encomendas",
+
+    // Lithuanian
+    "uzsakymas",
+    "uzsakyti",
+    "uzsakymai",
+    "pirkti",
+
+    // Czech
+    "objednat",
+    "objednavka",
+    "objednavky",
+    "online-objednavka"
   ];
 
-  const deliveryVariants = [
+  const DELIVERY_KEYWORDS = [
+    // English
     "delivery",
+    "deliver",
     "home-delivery",
-    "lieferung",
+    "delivery-menu",
+    "food-delivery",
+    "order-delivery",
+
+    // French
     "livraison",
+    "livrer",
+    "livraison-a-domicile",
+    "livraison-repas",
+
+    // Spanish
+    "domicilio",
     "entrega",
+    "reparto",
+    "enviar",
+    "envio",
+
+    // German
+    "lieferung",
+    "liefern",
+    "lieferservice",
+
+    // Danish
+    "levering",
+    "udbringning",
+
+    // Portuguese
+    "entrega",
+    "entregas",
+    "ao-domicilio",
+
+    // Lithuanian
+    "pristatymas",
+    "i-namus",
+
+    // Czech
+    "rozvoz",
+    "dovoz",
+    "doruceni"
   ];
 
-  const comboVariants = [
-    "menu/home-delivery",
-    "menu/order-online",
-    "menu/takeaway",
-    "menu/collection",
-    "order/menu",
+  const TAKEAWAY_KEYWORDS = [
+    // English
+    "takeaway",
+    "take-away",
+    "pickup",
+    "pick-up",
+    "collection",
+    "clickandcollect",
+    "click-and-collect",
+    "togo",
+    "to-go",
+
+    // French
+    "emporter",
+    "a-emporter",
+    "vente-a-emporter",
+    "retrait",
+
+    // Spanish
+    "para-llevar",
+    "llevar",
+    "recoger",
+    "retiro",
+
+    // German
+    "abholen",
+    "abholung",
+    "mitnehmen",
+    "zum-mitnehmen",
+
+    // Danish
+    "afhentning",
+
+    // Portuguese
+    "recolha",
+
+    // Lithuanian
+    "issinesti",
+
+    // Czech
+    "sebou",
+    "s-sebou"
+  ];
+
+  const DEEP_MENU_LEAFS = [
+    "collection",
+    "home-delivery",
+    "delivery",
+    "pickup",
+    "takeaway",
+    "order",
+    "order-online",
+    "food-delivery",
+    "click-and-collect",
+    "clickandcollect",
+    "abholen",
+    "afhentning",
+    "recolha",
+    "sebou",
+    "issinesti"
   ];
 
   const joinPath = (base, slug) => {
@@ -1101,39 +1521,109 @@ function buildMenuCandidates(sourceUrl) {
     return `${b}/${s}`.replace(/\/{2,}/g, "/");
   };
 
-  const addVariantGroup = (base, variants, weightHtml = true) => {
+  const addWithForms = (path) => {
+    const p = String(path || "").replace(/\/{2,}/g, "/");
+    add(p);
+    add(`${p}/`);
+    add(`${p}.html`);
+  };
+
+  const addVariantGroup = (base, variants) => {
     for (const v of variants) {
-      const p = joinPath(base, v);
-      add(p);
-      add(`${p}/`);
-      if (weightHtml) add(`${p}.html`);
+      addWithForms(joinPath(base, v));
+    }
+  };
+
+  const addNestedVariants = (base) => {
+    for (const menuSlug of MENU_KEYWORDS) {
+      const menuBase = joinPath(base, menuSlug);
+      addWithForms(menuBase);
+
+      for (const leaf of DEEP_MENU_LEAFS) {
+        addWithForms(joinPath(menuBase, leaf));
+      }
+
+      for (const orderSlug of ORDER_KEYWORDS) {
+        addWithForms(joinPath(menuBase, orderSlug));
+      }
+
+      for (const deliverySlug of DELIVERY_KEYWORDS) {
+        addWithForms(joinPath(menuBase, deliverySlug));
+      }
+
+      for (const takeawaySlug of TAKEAWAY_KEYWORDS) {
+        addWithForms(joinPath(menuBase, takeawaySlug));
+      }
+    }
+  };
+
+  const addOrderNestedVariants = (base) => {
+    for (const orderSlug of ORDER_KEYWORDS) {
+      const orderBase = joinPath(base, orderSlug);
+      addWithForms(orderBase);
+
+      for (const menuSlug of MENU_KEYWORDS) {
+        addWithForms(joinPath(orderBase, menuSlug));
+      }
+
+      for (const deliverySlug of DELIVERY_KEYWORDS) {
+        addWithForms(joinPath(orderBase, deliverySlug));
+      }
+
+      for (const takeawaySlug of TAKEAWAY_KEYWORDS) {
+        addWithForms(joinPath(orderBase, takeawaySlug));
+      }
     }
   };
 
   // 1) preserve current path context first
   for (const base of bases) {
-    add(base || "/");
-    addVariantGroup(base, menuVariants, true);
-    addVariantGroup(base, orderVariants, true);
-    addVariantGroup(base, deliveryVariants, true);
-    addVariantGroup(base, comboVariants, true);
+    if (base) {
+      add(base);
+      add(`${base}/`);
+    }
+
+    addVariantGroup(base, MENU_KEYWORDS);
+    addVariantGroup(base, ORDER_KEYWORDS);
+    addVariantGroup(base, DELIVERY_KEYWORDS);
+    addVariantGroup(base, TAKEAWAY_KEYWORDS);
+
+    addNestedVariants(base);
+    addOrderNestedVariants(base);
   }
 
-  // 2) common root-level direct hits
+  // 2) explicit Levante-style /menu/... hits at root
   add("/menu");
   add("/menu/");
+  add("/menu.html");
   add("/menu/home-delivery.html");
+  add("/menu/home-delivery/");
+  add("/menu/collection.html");
+  add("/menu/collection/");
+  add("/menu/delivery.html");
+  add("/menu/delivery/");
+  add("/menu/pickup.html");
+  add("/menu/pickup/");
+  add("/menu/takeaway.html");
+  add("/menu/takeaway/");
+
+  // 3) common root-level direct hits
   add("/order");
   add("/order-online");
   add("/orderfood");
+  add("/fastorder");
+  add("/homeorder");
   add("/delivery");
   add("/takeaway");
   add("/collection");
+  add("/pickup");
+  add("/click-and-collect");
+  add("/clickandcollect");
 
-  // 3) keep original source URL as a candidate too
+  // 4) keep original source URL too
   add(url.toString());
 
-  return out.slice(0, 80);
+  return out.slice(0, 140);
 }
 
 async function callCrawlerExtract(sourceUrl) {
