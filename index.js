@@ -999,6 +999,143 @@ function detectMenuUrlFromHtml(html, baseUrl) {
   return candidates[0].url;
 }
 
+function buildMenuCandidates(sourceUrl) {
+  const src = asTrimmedString(sourceUrl);
+  if (!src) return [];
+
+  let url;
+  try {
+    url = new URL(src);
+  } catch {
+    return [];
+  }
+
+  const out = [];
+  const seen = new Set();
+
+  const add = (candidate) => {
+    try {
+      const normalized = new URL(candidate, url.origin).toString();
+      if (seen.has(normalized)) return;
+      seen.add(normalized);
+      out.push(normalized);
+    } catch {
+      // ignore bad candidate
+    }
+  };
+
+  const cleanPath = String(url.pathname || "/")
+    .replace(/\/{2,}/g, "/")
+    .trim();
+
+  const pathParts = cleanPath.split("/").filter(Boolean);
+
+  // if last segment looks like a file, drop it
+  const looksLikeFile = pathParts.length > 0 && /\.[a-z0-9]{2,8}$/i.test(pathParts[pathParts.length - 1]);
+  const dirParts = looksLikeFile ? pathParts.slice(0, -1) : pathParts;
+
+  const fullBase = "/" + dirParts.join("/");
+  const parentBase =
+    dirParts.length > 1 ? "/" + dirParts.slice(0, -1).join("/") : "";
+  const rootBase = "";
+
+  const bases = [];
+  if (fullBase && fullBase !== "/") bases.push(fullBase);
+  if (parentBase && parentBase !== fullBase && parentBase !== "/") bases.push(parentBase);
+  bases.push(rootBase);
+
+  const menuVariants = [
+    "menu",
+    "menus",
+    "food",
+    "food-menu",
+    "drinks",
+    "drink-menu",
+    "dining",
+    "our-menu",
+    "restaurant-menu",
+    "carte",
+    "la-carte",
+    "carta",
+    "speisekarte",
+    "menukaart",
+    "meniu",
+  ];
+
+  const orderVariants = [
+    "order",
+    "order-online",
+    "orderfood",
+    "fastorder",
+    "homeorder",
+    "takeaway",
+    "pickup",
+    "collection",
+    "click-and-collect",
+    "bestellen",
+    "commande",
+    "commander",
+    "ordenar",
+    "pedir",
+  ];
+
+  const deliveryVariants = [
+    "delivery",
+    "home-delivery",
+    "lieferung",
+    "livraison",
+    "entrega",
+  ];
+
+  const comboVariants = [
+    "menu/home-delivery",
+    "menu/order-online",
+    "menu/takeaway",
+    "menu/collection",
+    "order/menu",
+  ];
+
+  const joinPath = (base, slug) => {
+    const b = base && base !== "/" ? base.replace(/\/+$/, "") : "";
+    const s = String(slug || "").replace(/^\/+/, "");
+    return `${b}/${s}`.replace(/\/{2,}/g, "/");
+  };
+
+  const addVariantGroup = (base, variants, weightHtml = true) => {
+    for (const v of variants) {
+      const p = joinPath(base, v);
+      add(p);
+      add(`${p}/`);
+      if (weightHtml) add(`${p}.html`);
+    }
+  };
+
+  // 1) preserve current path context first
+  for (const base of bases) {
+    add(base || "/");
+    addVariantGroup(base, menuVariants, true);
+    addVariantGroup(base, orderVariants, true);
+    addVariantGroup(base, deliveryVariants, true);
+    addVariantGroup(base, comboVariants, true);
+  }
+
+  // 2) common root-level direct hits
+  add("/menu");
+  add("/menu/");
+  add("/menu/home-delivery.html");
+  add("/order");
+  add("/order-online");
+  add("/orderfood");
+  add("/delivery");
+  add("/takeaway");
+  add("/collection");
+
+  // 3) keep original source URL as a candidate too
+  add(url.toString());
+
+  return out.slice(0, 80);
+}
+
 async function callCrawlerExtract(sourceUrl) {
   const url = asTrimmedString(sourceUrl);
   if (!url) {
