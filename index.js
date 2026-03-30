@@ -2334,6 +2334,12 @@ const handlers = {
 
     let bestFetch = null;
 
+jlog("menu_candidates", {
+  msgId,
+  extraction_id: extraction.id,
+  urls: urlsToTry,
+});
+
     for (const candidateUrl of urlsToTry) {
       try {
         let result = null;
