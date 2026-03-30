@@ -2385,6 +2385,14 @@ jlog("menu_candidates", {
       }
     }
 
+jlog("menu_best_fetch_selected", {
+  msgId,
+  extraction_id: extraction.id,
+  best_url: bestFetch?.url || null,
+  final_url: bestFetch?.final_url || null,
+  score: bestFetch?.score || 0,
+});
+
     fetched = bestFetch;
 
     if (!fetched) {
