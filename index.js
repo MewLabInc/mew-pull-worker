@@ -922,6 +922,21 @@ function stripHtmlToText(html) {
     .slice(0, 50000);
 }
 
+function collapseDuplicatePathSegments(urlObj) {
+  const parts = urlObj.pathname.split("/").filter(Boolean);
+  const deduped = [];
+
+  for (let i = 0; i < parts.length; i++) {
+    if (i > 0 && parts[i].toLowerCase() === parts[i - 1].toLowerCase()) {
+      continue;
+    }
+    deduped.push(parts[i]);
+  }
+
+  urlObj.pathname = "/" + deduped.join("/");
+  return urlObj.toString();
+}
+
 function detectMenuUrlFromHtml(html, baseUrl) {
   const raw = String(html || "");
 
@@ -1157,15 +1172,19 @@ function detectMenuUrlFromHtml(html, baseUrl) {
       continue;
     }
 
-    if (!/^https?:$/i.test(resolved.protocol)) continue;
+   if (!/^https?:$/i.test(resolved.protocol)) continue;
 
-    const urlStr = resolved.toString();
-    if (blockedExtPattern.test(urlStr)) continue;
+let urlStr = resolved.toString();
+urlStr = collapseDuplicatePathSegments(new URL(urlStr));
 
-    const sameHost = resolved.hostname === base.hostname;
-    const pathLower = resolved.pathname.toLowerCase();
-    const fullLower = `${urlStr} ${anchorText}`.toLowerCase();
-    const segmentCount = countSegments(pathLower);
+if (blockedExtPattern.test(urlStr)) continue;
+
+const normalizedUrl = new URL(urlStr);
+
+const sameHost = normalizedUrl.hostname === base.hostname;
+const pathLower = normalizedUrl.pathname.toLowerCase();
+const fullLower = `${urlStr} ${anchorText}`.toLowerCase();
+const segmentCount = countSegments(pathLower);
 
     let score = 0;
 
