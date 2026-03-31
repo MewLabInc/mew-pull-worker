@@ -2636,6 +2636,42 @@ const handlers = {
 
     const result = await insertPlaceContactPoints(placeId, points);
 
+// ---- derive signals ----
+const hasContact = points.some(p => p.contact_type === "phone" || p.contact_type === "email");
+
+const hasOrdering = points.some(p => p.contact_type === "order_url");
+const hasDelivery = points.some(p => p.contact_type === "delivery_url");
+const hasBooking = points.some(p => p.contact_type === "booking_url");
+
+const hasWebsite = !!source?.source_url;
+
+const hasMenuLink = points.some(p =>
+  p.contact_type === "order_url" || p.contact_type === "delivery_url"
+);
+
+// ---- persist signals ----
+const { error: signalErr } = await supabase
+  .from("places")
+  .update({
+    signals: {
+      has_website: hasWebsite,
+      has_menu_link: hasMenuLink,
+      has_ordering: hasOrdering,
+      has_delivery: hasDelivery,
+      has_contact: hasContact,
+      has_booking: hasBooking,
+      last_sidecar_at: new Date().toISOString()
+    }
+  })
+  .eq("id", placeId);
+
+if (signalErr) {
+  jlog("place_sidecar_signal_update_failed", {
+    place_id: placeId,
+    err: signalErr.message
+  });
+}
+
     jlog("place_sidecar_done", {
       msgId,
       place_id: placeId,

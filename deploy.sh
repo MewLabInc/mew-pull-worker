@@ -7,6 +7,7 @@ node --check index.js
 
 git add -A
 git commit -m "${1:-checkpoint}" || true
+git push
 
 gcloud run deploy mew-pull-worker \
   --source . \
