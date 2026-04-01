@@ -1707,18 +1707,41 @@ async function callCrawlerExtract(sourceUrl) {
     throw e;
   }
 
-  return {
-    final_url: asTrimmedString(data.final_url) || url,
-    http_status: Number(data.status || 200),
-    content_type: "text/html",
-    raw_html: String(data.html_preview || ""),
-    raw_text: stripHtmlToText(String(data.html_preview || "")),
-    page_title: (() => {
-      const m = String(data.html_preview || "").match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-      return m ? m[1].replace(/\s+/g, " ").trim().slice(0, 500) : null;
-    })(),
-    links: [],
-  };
+  const rawHtml =
+  String(
+    data.html ||
+    data.raw_html ||
+    data.content ||
+    data.markdown ||
+    data.text ||
+    data.html_preview ||
+    ""
+  );
+
+const rawText =
+  String(
+    data.text ||
+    data.markdown ||
+    stripHtmlToText(rawHtml) ||
+    ""
+  );
+
+const links = Array.isArray(data.links)
+  ? data.links
+  : [];
+
+return {
+  final_url: asTrimmedString(data.final_url) || url,
+  http_status: Number(data.status || 200),
+  content_type: "text/html",
+  raw_html: rawHtml,
+  raw_text: rawText,
+  page_title: (() => {
+    const m = rawHtml.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    return m ? m[1].replace(/\s+/g, " ").trim().slice(0, 500) : null;
+  })(),
+  links,
+};
 }
 
 async function classifyMenuLinksWithLLM(links) {
@@ -2610,10 +2633,34 @@ const handlers = {
     let finalUrl = crawl?.final_url || source.source_url;
 
     if (!html) {
-      const fetched = await fetchMenuSourcePage(source.source_url);
-      html = fetched.raw_html || "";
-      finalUrl = fetched.final_url || source.source_url;
-    }
+  try {
+    const fetched = await callCrawlerExtract(source.source_url);
+    html = fetched.raw_html || "";
+    finalUrl = fetched.final_url || source.source_url;
+
+  
+  jlog("place_sidecar_crawler_used", {
+  msgId,
+  dedupe_key: envelope?.dedupe_key,
+  place_id: placeId,
+  source_url: source.source_url,
+  final_url: finalUrl,
+  raw_html_len: html.length
+});
+  } catch (err) {
+   jlog("place_sidecar_crawler_failed_fallback", {
+  msgId,
+  dedupe_key: envelope?.dedupe_key,
+  place_id: placeId,
+  source_url: source.source_url,
+  err: err?.message || String(err)
+});
+
+    const fetched = await fetchMenuSourcePage(source.source_url);
+    html = fetched.raw_html || "";
+    finalUrl = fetched.final_url || source.source_url;
+  }
+}
 
     if (!html) {
       jlog("place_sidecar_no_html", {
