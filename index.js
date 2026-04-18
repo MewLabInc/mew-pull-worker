@@ -29,7 +29,7 @@ const CRAWLER_EXTRACT_BASE_URL = process.env.CRAWLER_EXTRACT_BASE_URL || "http:/
 // ---- daily quota controls ----
 // NOTE: There are two try_consume_daily_quota overloads in your DB history.
 // This worker supports BOTH safely via tryConsumeDailyQuota() below.
-const USDA_DAILY_LIMIT = Number(process.env.USDA_DAILY_LIMIT || "2000");
+const USDA_DAILY_LIMIT = Number(process.env.USDA_DAILY_LIMIT || "5000");
 const USDA_QUOTA_KEY = process.env.USDA_QUOTA_KEY || "usda_ingest";
 
 const WEBHUNTER_DAILY_LIMIT = Number(process.env.WEBHUNTER_DAILY_LIMIT || "200");
@@ -2368,6 +2368,15 @@ function buildSidecarContactPoints({
   sourceDomain = null,
   provider = "webhunter_sidecar_v1",
 }) {
+
+  const resolveUrl = (href) => {
+    try {
+      const resolved = new URL(href, baseUrl).toString();
+      return resolved.replace(/(\/restaurant)+/g, "/restaurant");
+    } catch {
+      return null;
+    }
+  };
   
   const results = [];
   const seen = new Set();
@@ -2406,12 +2415,15 @@ for (const email of emailMatches) {
   const lowerEmail = String(email).toLowerCase();
 
   // Filter junk (Wix / Sentry / tracking)
-  if (
-    lowerEmail.includes("sentry") ||
-    lowerEmail.includes("wixpress")
-  ) {
-    continue;
-  }
+ if (
+  lowerEmail.includes("sentry") ||
+  lowerEmail.includes("wixpress") ||
+  lowerEmail === "you@you.com" ||
+  lowerEmail.endsWith("@example.com") ||
+  lowerEmail.endsWith("@test.com")
+) {
+  continue;
+}
 
   addPoint({
     contact_type: "email",
@@ -2430,6 +2442,9 @@ for (const phone of phoneMatches) {
 
   // Require real phone length (avoid IDs / garbage)
   if (digitsOnly.length < 9) continue;
+if (/^(12345678910|123456789101112|0123456789)/.test(digitsOnly)) continue;
+if (/^(\d)\1{7,}$/.test(digitsOnly)) continue;
+if (/123456789|1011121314/.test(digitsOnly)) continue;
 
   addPoint({
     contact_type: "phone",
@@ -2443,26 +2458,24 @@ for (const phone of phoneMatches) {
   const hrefRegex = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
   let match;
 
-  const resolveUrl = (href) => {
-    try {
-      return new URL(href, baseUrl).toString();
-    } catch {
-      return null;
-    }
-  };
+while ((match = hrefRegex.exec(rawHtml)) !== null) {
+  const href = String(match[1] || "").trim();
+  const anchorHtml = String(match[2] || "");
+  const anchorText = anchorHtml
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
 
-  while ((match = hrefRegex.exec(rawHtml)) !== null) {
-    const href = String(match[1] || "").trim();
-    const anchorHtml = String(match[2] || "");
-    const anchorText = anchorHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+  if (!href) continue;
+  if (/^(mailto:|tel:|javascript:|#)/i.test(href)) continue;
 
-    if (!href) continue;
-    if (/^(mailto:|tel:|javascript:|#)/i.test(href)) continue;
+  const resolved = resolveUrl(href);
+  if (!resolved) continue;
 
-    const resolved = resolveUrl(href);
-    if (!resolved) continue;
+  const lower = `${resolved} ${anchorText}`.toLowerCase();
 
-    const lower = `${resolved} ${anchorText}`.toLowerCase();
+  // rest of logic...
 
     if (/(instagram|facebook|tiktok|youtube|linkedin|x\.com|twitter\.com)/i.test(lower)) {
       addPoint({
@@ -2680,6 +2693,46 @@ const handlers = {
       sourceDomain: source.source_domain || null,
       provider,
     });
+
+const contactPoint = points.find(p => p.contact_type === "contact_url");
+if (contactPoint?.contact_value) {
+  try {
+    const contactFetched = await callCrawlerExtract(contactPoint.contact_value);
+
+    const contactPoints = buildSidecarContactPoints({
+      html: contactFetched.raw_html || "",
+      baseUrl: contactFetched.final_url || contactPoint.contact_value,
+      sourceUrl: contactFetched.final_url || contactPoint.contact_value,
+      sourceDomain: source.source_domain || null,
+      provider,
+    });
+
+  const contactPagePoints = contactPoints.filter(p =>
+  ["phone", "email"].includes(p.contact_type)
+);
+
+points.push(...contactPagePoints);
+
+    jlog("place_sidecar_contact_page_used", {
+      msgId,
+      dedupe_key: envelope?.dedupe_key,
+      place_id: placeId,
+      contact_url: contactPoint.contact_value,
+      final_url: contactFetched.final_url || contactPoint.contact_value,
+      added_points: contactPoints.length
+    });
+  } catch (err) {
+    jlog("place_sidecar_contact_page_failed", {
+      msgId,
+      dedupe_key: envelope?.dedupe_key,
+      place_id: placeId,
+      contact_url: contactPoint.contact_value,
+      err: err?.message || String(err)
+    });
+  }
+}
+
+
 
     const result = await insertPlaceContactPoints(placeId, points);
 
