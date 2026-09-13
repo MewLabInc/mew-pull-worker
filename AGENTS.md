@@ -73,3 +73,12 @@ does not verify retry/idempotency, database effects or deployed behavior.
 Report changed files/behavior, actual checks/results, pending evidence/manual QA,
 Issue/branch/commit/PR and any handoff next action. Keep live ownership and schema
 facts UNKNOWN until verified; local checks never establish production readiness.
+
+Before closing, perform a durable-knowledge checkpoint: ask whether any material
+learning would be lost if the chat/session disappeared. Put task chronology,
+failed attempts, repairs, QA and evidence in the existing Issue/PR; stable current
+worker behavior or operating rules in this repository's maintained docs; material
+high-level status changes in the appropriate current system/index document; and
+cross-repository ownership, architecture, platform status, navigation, routing or
+handoff changes in Mew Brain. Do not create Build Notes or generic catch-all
+summary files. Link to the authoritative record instead of duplicating it.
