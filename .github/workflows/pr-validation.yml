@@ -28,11 +28,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Matches the Dockerfile runtime (node:20-slim), which packages index.js only.
+      # Matches the patched Node.js version in Dockerfile (CVE-2026-111497).
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24.22.1"
 
       # Parses index.js as ESM ("type": "module") without executing it.
       # The worker is never started: npm start would consume the live subscription.

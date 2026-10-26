@@ -62,6 +62,15 @@ operational data out of commits.
 
 ## Verification and completion
 
+The container pins Node.js 24.22.1 on Debian bookworm-slim by immutable image
+index digest; PR syntax validation uses the same exact Node version. Keep these
+aligned when refreshing the runtime, and verify the built image's actual Node
+version and target architecture. Production dependencies install with
+`npm ci --omit=dev` from the committed lockfile; do not regenerate it for a runtime
+refresh unless dependency changes are separately authorized. See
+[Issue #6](https://github.com/MewLabInc/mew-pull-worker/issues/6) for CVE-2026-111497
+verification and the human deployment/rollback checklist.
+
 Run `node --check index.js` for non-executing JavaScript syntax validation and
 `git diff --check` for whitespace; verify instruction links/paths for docs-only work.
 `package.json` defines only `npm start`, which executes the worker, **not a test**.
