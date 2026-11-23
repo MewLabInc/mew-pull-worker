@@ -39,25 +39,50 @@ test("AC4 after upsert returns id, food_items updated with usda_data_type/source
   await t.handler(env());
   const u = updates(t.supabase, "food_items");
   assert.equal(u.length, 1);
-  assert.deepEqual(u[0].args, { source_stream_key: "foundation", usda_data_type: "Foundation" });
+  assert.deepEqual(u[0].args, { usda_data_type: "Foundation", source_stream_key: "foundation" });
   assert.deepEqual(u[0].filters, [["id", FOOD_ID], ["source", "usda"], ["source_id", "900001"]]);
   assert.ok(t.order.indexOf("rpc:upsert_food_item_from_usda_v1") < t.order.length);
 });
 
-test("AC4 detail dataType 'SR Legacy' maps stream sr_legacy; unknown type -> stream null, raw type kept", async () => {
-  let t = setup({ fetchResp: jsonResponse({ ...detail, dataType: "SR Legacy" }) });
+test("AC4 known dataType 'SR Legacy' writes { usda_data_type, source_stream_key: sr_legacy }", async () => {
+  const t = setup({ fetchResp: jsonResponse({ ...detail, dataType: "SR Legacy" }) });
   await t.handler(env());
-  assert.deepEqual(updates(t.supabase, "food_items")[0].args, { source_stream_key: "sr_legacy", usda_data_type: "SR Legacy" });
-  t = setup({ fetchResp: jsonResponse({ ...detail, dataType: "Invented Type" }) });
-  await t.handler(env());
-  assert.deepEqual(updates(t.supabase, "food_items")[0].args, { source_stream_key: null, usda_data_type: "Invented Type" });
+  assert.deepEqual(updates(t.supabase, "food_items")[0].args, { usda_data_type: "SR Legacy", source_stream_key: "sr_legacy" });
 });
 
-test("AC4 missing dataType in detail writes null/null (finding: overwrites any queue-provided type)", async () => {
+test("AC4 unknown dataType writes exactly { usda_data_type: raw } with no source_stream_key key", async () => {
+  const t = setup({ fetchResp: jsonResponse({ ...detail, dataType: "Invented Type" }) });
+  await t.handler(env());
+  const u = updates(t.supabase, "food_items");
+  assert.equal(u.length, 1);
+  assert.deepEqual(u[0].args, { usda_data_type: "Invented Type" });
+  assert.equal("source_stream_key" in u[0].args, false);
+});
+
+test("AC4 detail without dataType: no food_items update, skip logged, full RPC order still holds", async () => {
   const { dataType, ...noType } = detail;
   const t = setup({ fetchResp: jsonResponse(noType) });
   await t.handler(env());
-  assert.deepEqual(updates(t.supabase, "food_items")[0].args, { source_stream_key: null, usda_data_type: null });
+  assert.equal(t.supabase.calls.filter((c) => c.table === "food_items").length, 0);
+  const skip = t.logs.filter(([e]) => e === "usda_metadata_skipped_no_data_type");
+  assert.equal(skip.length, 1);
+  assert.deepEqual(skip[0][1], { msgId: "m1", fdcId: "900001", food_id: FOOD_ID });
+  assert.ok(!t.logs.some(([e]) => e === "usda_metadata_ok"));
+  assert.deepEqual(t.order, [
+    "quota",
+    "rpc:upsert_food_item_from_usda_v1",
+    "evidence", "evidence", "evidence", "evidence", "evidence", "evidence",
+    "rpc:resolve_food_item_macros_v1_2",
+    "rpc:compute_food_item_quality_rollup_v1",
+    "rpc:compute_food_item_seo_v2",
+    "rpc:apply_food_item_cluster_seo_gate",
+  ]);
+});
+
+test("AC4 whitespace-only dataType is treated as missing (no update)", async () => {
+  const t = setup({ fetchResp: jsonResponse({ ...detail, dataType: "   " }) });
+  await t.handler(env());
+  assert.equal(t.supabase.calls.filter((c) => c.table === "food_items").length, 0);
 });
 
 test("AC4 metadata update error throws usda_metadata_update_failed, no evidence written", async () => {
