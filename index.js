@@ -132,6 +132,24 @@ function numOrNull(x) {
   return Number.isFinite(n) ? n : null;
 }
 
+// USDA FDC catalog streams: stream_key -> FDC API dataType.
+// Same mapping as Mew-backoffice lib/worker/food/usda.ts (USDA_STREAMS).
+const USDA_STREAMS = {
+  branded: "Branded",
+  foundation: "Foundation",
+  fndds: "Survey (FNDDS)",
+  sr_legacy: "SR Legacy",
+};
+
+function normalizeUsdaStreamKey(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return (
+    Object.keys(USDA_STREAMS).find(
+      (key) => key === normalized || USDA_STREAMS[key].toLowerCase() === normalized
+    ) ?? null
+  );
+}
+
 async function fetchUsdaFood(fdcId) {
   const apiKey = workerCfg?.USDA_API_KEY;
   if (!apiKey) {
@@ -181,6 +199,9 @@ async function fetchUsdaFoodsPage(pageNumber, pageSize = 200, dataType = null) {
   if (dataType) {
     url += `&dataType=${encodeURIComponent(dataType)}`;
   }
+
+  // Stable ordering so a cursor page always means the same slice of the stream.
+  url += `&sortBy=fdcId&sortOrder=asc`;
 
   const resp = await fetch(url, { method: "GET" });
 
@@ -2790,7 +2811,18 @@ if (signalErr) {
     const msgId = meta?.msgId;
     const batch_size = envelope?.payload?.batch_size ?? 80;
 
-    jlog("usda_seed_tick_start", { msgId, batch_size });
+    // Each stream pages its own FDC dataType with its own cursor row. Before this,
+    // the "foundation" cursor paged the unfiltered catalog (every dataType,
+    // including all Branded revisions) and no row recorded its dataType.
+    const stream_key = normalizeUsdaStreamKey(envelope?.payload?.stream_key ?? "foundation");
+    if (!stream_key) {
+      const e = new Error("ENVELOPE:invalid_usda_stream");
+      e.status = 400;
+      throw e;
+    }
+    const usda_data_type = USDA_STREAMS[stream_key];
+
+    jlog("usda_seed_tick_start", { msgId, batch_size, stream_key });
 
     const { count: queuedCount, error: qCountErr } = await supabase
       .from("usda_seed_queue")
@@ -2805,23 +2837,31 @@ if (signalErr) {
       const { data: cursorRow, error: cursorErr } = await supabase
         .from("usda_catalog_cursor")
         .select("stream_key,page_number,page_size")
-        .eq("stream_key", "foundation")
-        .single();
+        .eq("stream_key", stream_key)
+        .maybeSingle();
 
       if (cursorErr) throw new Error("usda_cursor_read_failed: " + cursorErr.message);
 
-      const pageNumber = Number(cursorRow.page_number || 1);
-      const pageSize = Number(cursorRow.page_size || 200);
+      const pageNumber = Number(cursorRow?.page_number || 1);
+      const pageSize = Number(cursorRow?.page_size || 200);
 
-      jlog("usda_catalog_fetch_start", { msgId, pageNumber, pageSize });
+      jlog("usda_catalog_fetch_start", { msgId, stream_key, pageNumber, pageSize });
 
-      const resp = await fetchUsdaFoodsPage(pageNumber, pageSize);
+      const resp = await fetchUsdaFoodsPage(pageNumber, pageSize, usda_data_type);
       const foods = Array.isArray(resp?.data) ? resp.data : (Array.isArray(resp?.data?.foods) ? resp.data.foods : []);
 
       const rowsToInsert = foods
-        .map((f) => mustString((f?.fdcId ?? f?.fdc_id)?.toString()))
-        .filter(Boolean)
-        .map((fdc_id) => ({ fdc_id }));
+        .map((f) => ({
+          fdc_id: mustString((f?.fdcId ?? f?.fdc_id)?.toString()),
+          data_type: mustString(f?.dataType),
+        }))
+        .filter((f) => f.fdc_id)
+        .map((f) => ({
+          fdc_id: f.fdc_id,
+          status: "queued",
+          source_stream_key: stream_key,
+          usda_data_type: f.data_type ?? usda_data_type,
+        }));
 
       if (rowsToInsert.length > 0) {
         const { error: insertErr } = await supabase
@@ -2833,19 +2873,27 @@ if (signalErr) {
         }
       }
 
+      // Short/empty page = end of stream: wrap to page 1 instead of paging forever.
+      const nextPage = foods.length < pageSize ? 1 : pageNumber + 1;
       const { error: cursorUpdateErr } = await supabase
         .from("usda_catalog_cursor")
-        .update({
-          page_number: pageNumber + 1,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("stream_key", "foundation");
+        .upsert(
+          {
+            stream_key,
+            page_number: nextPage,
+            page_size: pageSize,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: "stream_key" }
+        );
 
       if (cursorUpdateErr) throw new Error("usda_cursor_update_failed: " + cursorUpdateErr.message);
 
       jlog("usda_catalog_fetch_done", {
         msgId,
+        stream_key,
         pageNumber,
+        nextPage,
         fetched: foods.length,
         enqueued: rowsToInsert.length,
       });
@@ -3277,6 +3325,23 @@ jlog("menu_best_fetch_selected", {
 
     jlog("db_food_upsert_ok", { msgId: meta?.msgId, fdcId, food_id: foodId });
 
+    // Record which FDC dataset this row came from. Canonical election ranks
+    // duplicates by usda_data_type (food_item_data_type_rank); without it every
+    // row ranks as "missing" and datasets cannot be told apart.
+    const detailDataType = mustString(usda?.dataType) || mustString(usda?.datatype);
+    const { error: metadataErr } = await supabase
+      .from("food_items")
+      .update({
+        source_stream_key: normalizeUsdaStreamKey(detailDataType),
+        usda_data_type: detailDataType,
+      })
+      .eq("id", foodId)
+      .eq("source", "usda")
+      .eq("source_id", fdcId);
+
+    if (metadataErr) throw new Error("usda_metadata_update_failed: " + metadataErr.message);
+    jlog("usda_metadata_ok", { msgId: meta?.msgId, fdcId, food_id: foodId, usda_data_type: detailDataType });
+
     const macros = extractUsdaMacrosPer100g(usda);
 
     const source = "usda";
@@ -3330,6 +3395,11 @@ jlog("menu_best_fetch_selected", {
 
     await rpcOrThrow("compute_food_item_seo_v2", { p_food_item_id: foodId });
     jlog("seo_compute_ok", { msgId: meta?.msgId, fdcId, food_id: foodId });
+
+    // compute_food_item_seo_v2 resets canonicality; without the cluster gate a
+    // refresh re-promotes an already-suppressed duplicate into the sitemap.
+    await rpcOrThrow("apply_food_item_cluster_seo_gate", { p_food_item_id: foodId });
+    jlog("seo_cluster_gate_ok", { msgId: meta?.msgId, fdcId, food_id: foodId });
       // Mark seed queue item done when USDA ingest succeeds
       const { error: qDoneErr } = await supabase
         .from("usda_seed_queue")
