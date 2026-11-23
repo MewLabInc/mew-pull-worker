@@ -1,0 +1,13 @@
+{
+  "fdcId": 900001,
+  "description": "Invented Test Lentils, cooked",
+  "dataType": "Foundation",
+  "foodNutrients": [
+    { "nutrient": { "id": 1008, "name": "Energy", "unitName": "kcal" }, "amount": 111.5 },
+    { "nutrient": { "id": 1003, "name": "Protein", "unitName": "g" }, "amount": 7.25 },
+    { "nutrient": { "id": 1005, "name": "Carbohydrate, by difference", "unitName": "g" }, "amount": 19.5 },
+    { "nutrient": { "id": 1004, "name": "Total lipid (fat)", "unitName": "g" }, "amount": 0.75 },
+    { "nutrient": { "id": 1079, "name": "Fiber, total dietary", "unitName": "g" }, "amount": 6.5 },
+    { "nutrient": { "id": 2000, "name": "Sugars, total including NLEA", "unitName": "g" }, "amount": 1.25 }
+  ]
+}

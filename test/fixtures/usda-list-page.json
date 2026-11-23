@@ -1,0 +1,5 @@
+[
+  { "fdcId": 900101, "dataType": "Foundation", "description": "Invented A" },
+  { "fdcId": 900102, "description": "Invented B, no dataType" },
+  { "fdcId": 900103, "dataType": "SR Legacy", "description": "Invented C" }
+]
