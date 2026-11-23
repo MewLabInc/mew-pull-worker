@@ -3769,7 +3769,9 @@ jlog("crawler_health_check", {
                   const { error: qRetryErr } = await supabase
                     .from("usda_seed_queue")
                     .update({
-                      status: "retry",
+                      // claim_usda_seed_batch_v1 only selects status='queued' (or expired leases)
+                      // with next_run_at <= now(); 'retry' is never claimed.
+                      status: "queued",
                       last_error: stats.lastErr,
                       next_run_at: nextRetryAt,
                       lease_expires_at: null,
